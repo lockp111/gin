@@ -21,7 +21,6 @@ import (
 	"github.com/gin-gonic/gin/testdata/protoexample"
 	"github.com/golang/protobuf/proto"
 	"github.com/stretchr/testify/assert"
-	"github.com/ugorji/go/codec"
 )
 
 type appkey struct {
@@ -64,9 +63,20 @@ type FooStructUseNumber struct {
 	Foo interface{} `json:"foo" binding:"required"`
 }
 
+type FooStructDisallowUnknownFields struct {
+	Foo interface{} `json:"foo" binding:"required"`
+}
+
 type FooBarStructForTimeType struct {
-	TimeFoo time.Time `form:"time_foo" time_format:"2006-01-02" time_utc:"1" time_location:"Asia/Chongqing"`
-	TimeBar time.Time `form:"time_bar" time_format:"2006-01-02" time_utc:"1"`
+	TimeFoo    time.Time `form:"time_foo" time_format:"2006-01-02" time_utc:"1" time_location:"Asia/Chongqing"`
+	TimeBar    time.Time `form:"time_bar" time_format:"2006-01-02" time_utc:"1"`
+	CreateTime time.Time `form:"createTime" time_format:"unixNano"`
+	UnixTime   time.Time `form:"unixTime" time_format:"unix"`
+}
+
+type FooStructForTimeTypeNotUnixFormat struct {
+	CreateTime time.Time `form:"createTime" time_format:"unixNano"`
+	UnixTime   time.Time `form:"unixTime" time_format:"unix"`
 }
 
 type FooStructForTimeTypeNotFormat struct {
@@ -152,9 +162,6 @@ func TestBindingDefault(t *testing.T) {
 	assert.Equal(t, ProtoBuf, Default("POST", MIMEPROTOBUF))
 	assert.Equal(t, ProtoBuf, Default("PUT", MIMEPROTOBUF))
 
-	assert.Equal(t, MsgPack, Default("POST", MIMEMSGPACK))
-	assert.Equal(t, MsgPack, Default("PUT", MIMEMSGPACK2))
-
 	assert.Equal(t, YAML, Default("POST", MIMEYAML))
 	assert.Equal(t, YAML, Default("PUT", MIMEYAML))
 }
@@ -185,6 +192,12 @@ func TestBindingJSONUseNumber2(t *testing.T) {
 		JSON, "json",
 		"/", "/",
 		`{"foo": 123}`, `{"bar": "foo"}`)
+}
+
+func TestBindingJSONDisallowUnknownFields(t *testing.T) {
+	testBodyBindingDisallowUnknownFields(t, JSON,
+		"/", "/",
+		`{"foo": "bar"}`, `{"foo": "bar", "what": "this"}`)
 }
 
 func TestBindingForm(t *testing.T) {
@@ -226,7 +239,10 @@ func TestBindingFormDefaultValue2(t *testing.T) {
 func TestBindingFormForTime(t *testing.T) {
 	testFormBindingForTime(t, "POST",
 		"/", "/",
-		"time_foo=2017-11-15&time_bar=", "bar2=foo")
+		"time_foo=2017-11-15&time_bar=&createTime=1562400033000000123&unixTime=1562400033", "bar2=foo")
+	testFormBindingForTimeNotUnixFormat(t, "POST",
+		"/", "/",
+		"time_foo=2017-11-15&createTime=bad&unixTime=bad", "bar2=foo")
 	testFormBindingForTimeNotFormat(t, "POST",
 		"/", "/",
 		"time_foo=2017-11-15", "bar2=foo")
@@ -240,8 +256,11 @@ func TestBindingFormForTime(t *testing.T) {
 
 func TestBindingFormForTime2(t *testing.T) {
 	testFormBindingForTime(t, "GET",
-		"/?time_foo=2017-11-15&time_bar=", "/?bar2=foo",
+		"/?time_foo=2017-11-15&time_bar=&createTime=1562400033000000123&unixTime=1562400033", "/?bar2=foo",
 		"", "")
+	testFormBindingForTimeNotUnixFormat(t, "POST",
+		"/", "/",
+		"time_foo=2017-11-15&createTime=bad&unixTime=bad", "bar2=foo")
 	testFormBindingForTimeNotFormat(t, "GET",
 		"/?time_foo=2017-11-15", "/?bar2=foo",
 		"", "")
@@ -418,7 +437,8 @@ func createFormFilesMultipartRequest(t *testing.T) *http.Request {
 	defer f.Close()
 	fw, err1 := mw.CreateFormFile("file", "form.go")
 	assert.NoError(t, err1)
-	io.Copy(fw, f)
+	_, err = io.Copy(fw, f)
+	assert.NoError(t, err)
 
 	req, err2 := http.NewRequest("POST", "/?foo=getfoo&bar=getbar", body)
 	assert.NoError(t, err2)
@@ -442,7 +462,8 @@ func createFormFilesMultipartRequestFail(t *testing.T) *http.Request {
 	defer f.Close()
 	fw, err1 := mw.CreateFormFile("file_foo", "form_foo.go")
 	assert.NoError(t, err1)
-	io.Copy(fw, f)
+	_, err = io.Copy(fw, f)
+	assert.NoError(t, err)
 
 	req, err2 := http.NewRequest("POST", "/?foo=getfoo&bar=getbar", body)
 	assert.NoError(t, err2)
@@ -531,7 +552,8 @@ func TestBindingFormPostForMapFail(t *testing.T) {
 func TestBindingFormFilesMultipart(t *testing.T) {
 	req := createFormFilesMultipartRequest(t)
 	var obj FooBarFileStruct
-	FormMultipart.Bind(req, &obj)
+	err := FormMultipart.Bind(req, &obj)
+	assert.NoError(t, err)
 
 	// file from os
 	f, _ := os.Open("form.go")
@@ -607,26 +629,6 @@ func TestBindingProtoBufFail(t *testing.T) {
 		string(data), string(data[1:]))
 }
 
-func TestBindingMsgPack(t *testing.T) {
-	test := FooStruct{
-		Foo: "bar",
-	}
-
-	h := new(codec.MsgpackHandle)
-	assert.NotNil(t, h)
-	buf := bytes.NewBuffer([]byte{})
-	assert.NotNil(t, buf)
-	err := codec.NewEncoder(buf, h).Encode(test)
-	assert.NoError(t, err)
-
-	data := buf.Bytes()
-
-	testMsgPackBodyBinding(t,
-		MsgPack, "msgpack",
-		"/", "/",
-		string(data), string(data[1:]))
-}
-
 func TestValidationFails(t *testing.T) {
 	var obj FooStruct
 	req := requestWithBody("POST", "/", `{"bar": "foo"}`)
@@ -645,9 +647,9 @@ func TestValidationDisabled(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestExistsSucceeds(t *testing.T) {
+func TestRequiredSucceeds(t *testing.T) {
 	type HogeStruct struct {
-		Hoge *int `json:"hoge" binding:"exists"`
+		Hoge *int `json:"hoge" binding:"required"`
 	}
 
 	var obj HogeStruct
@@ -656,14 +658,39 @@ func TestExistsSucceeds(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestExistsFails(t *testing.T) {
+func TestRequiredFails(t *testing.T) {
 	type HogeStruct struct {
-		Hoge *int `json:"foo" binding:"exists"`
+		Hoge *int `json:"foo" binding:"required"`
 	}
 
 	var obj HogeStruct
 	req := requestWithBody("POST", "/", `{"boen": 0}`)
 	err := JSON.Bind(req, &obj)
+	assert.Error(t, err)
+}
+
+func TestHeaderBinding(t *testing.T) {
+	h := Header
+	assert.Equal(t, "header", h.Name())
+
+	type tHeader struct {
+		Limit int `header:"limit"`
+	}
+
+	var theader tHeader
+	req := requestWithBody("GET", "/", "")
+	req.Header.Add("limit", "1000")
+	assert.NoError(t, h.Bind(req, &theader))
+	assert.Equal(t, 1000, theader.Limit)
+
+	req = requestWithBody("GET", "/", "")
+	req.Header.Add("fail", `{fail:fail}`)
+
+	type failStruct struct {
+		Fail map[string]interface{} `header:"fail"`
+	}
+
+	err := h.Bind(req, &failStruct{})
 	assert.Error(t, err)
 }
 
@@ -824,8 +851,28 @@ func testFormBindingForTime(t *testing.T, method, path, badPath, body, badBody s
 	assert.Equal(t, "Asia/Chongqing", obj.TimeFoo.Location().String())
 	assert.Equal(t, int64(-62135596800), obj.TimeBar.Unix())
 	assert.Equal(t, "UTC", obj.TimeBar.Location().String())
+	assert.Equal(t, int64(1562400033000000123), obj.CreateTime.UnixNano())
+	assert.Equal(t, int64(1562400033), obj.UnixTime.Unix())
 
 	obj = FooBarStructForTimeType{}
+	req = requestWithBody(method, badPath, badBody)
+	err = JSON.Bind(req, &obj)
+	assert.Error(t, err)
+}
+
+func testFormBindingForTimeNotUnixFormat(t *testing.T, method, path, badPath, body, badBody string) {
+	b := Form
+	assert.Equal(t, "form", b.Name())
+
+	obj := FooStructForTimeTypeNotUnixFormat{}
+	req := requestWithBody(method, path, body)
+	if method == "POST" {
+		req.Header.Add("Content-Type", MIMEPOSTForm)
+	}
+	err := b.Bind(req, &obj)
+	assert.Error(t, err)
+
+	obj = FooStructForTimeTypeNotUnixFormat{}
 	req = requestWithBody(method, badPath, badBody)
 	err = JSON.Bind(req, &obj)
 	assert.Error(t, err)
@@ -1104,6 +1151,25 @@ func testBodyBindingUseNumber2(t *testing.T, b Binding, name, path, badPath, bod
 	assert.Error(t, err)
 }
 
+func testBodyBindingDisallowUnknownFields(t *testing.T, b Binding, path, badPath, body, badBody string) {
+	EnableDecoderDisallowUnknownFields = true
+	defer func() {
+		EnableDecoderDisallowUnknownFields = false
+	}()
+
+	obj := FooStructDisallowUnknownFields{}
+	req := requestWithBody("POST", path, body)
+	err := b.Bind(req, &obj)
+	assert.NoError(t, err)
+	assert.Equal(t, "bar", obj.Foo)
+
+	obj = FooStructDisallowUnknownFields{}
+	req = requestWithBody("POST", badPath, badBody)
+	err = JSON.Bind(req, &obj)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "what")
+}
+
 func testBodyBindingFail(t *testing.T, b Binding, name, path, badPath, body, badBody string) {
 	assert.Equal(t, name, b.Name())
 
@@ -1157,23 +1223,6 @@ func testProtoBodyBindingFail(t *testing.T, b Binding, name, path, badPath, body
 	req = requestWithBody("POST", badPath, badBody)
 	req.Header.Add("Content-Type", MIMEPROTOBUF)
 	err = ProtoBuf.Bind(req, &obj)
-	assert.Error(t, err)
-}
-
-func testMsgPackBodyBinding(t *testing.T, b Binding, name, path, badPath, body, badBody string) {
-	assert.Equal(t, name, b.Name())
-
-	obj := FooStruct{}
-	req := requestWithBody("POST", path, body)
-	req.Header.Add("Content-Type", MIMEMSGPACK)
-	err := b.Bind(req, &obj)
-	assert.NoError(t, err)
-	assert.Equal(t, "bar", obj.Foo)
-
-	obj = FooStruct{}
-	req = requestWithBody("POST", badPath, badBody)
-	req.Header.Add("Content-Type", MIMEMSGPACK)
-	err = MsgPack.Bind(req, &obj)
 	assert.Error(t, err)
 }
 

@@ -12,10 +12,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin/internal/bytesconv"
 	"github.com/gin-gonic/gin/internal/json"
 )
 
-var errUnknownType = errors.New("Unknown type")
+var errUnknownType = errors.New("unknown type")
 
 func mapUri(ptr interface{}, m map[string][]string) error {
 	return mapFormByTag(ptr, m, "uri")
@@ -51,6 +52,10 @@ func mappingByPtr(ptr interface{}, setter setter, tag string) error {
 }
 
 func mapping(value reflect.Value, field reflect.StructField, setter setter, tag string) (bool, error) {
+	if field.Tag.Get(tag) == "-" { // just ignoring this field
+		return false, nil
+	}
+
 	var vKind = value.Kind()
 
 	if vKind == reflect.Ptr {
@@ -112,9 +117,6 @@ func tryToSetValue(value reflect.Value, field reflect.StructField, setter setter
 	tagValue = field.Tag.Get(tag)
 	tagValue, opts := head(tagValue, ",")
 
-	if tagValue == "-" { // just ignoring this field
-		return false, nil
-	}
 	if tagValue == "" { // default value is FieldName
 		tagValue = field.Name
 	}
@@ -207,9 +209,9 @@ func setWithProperType(val string, value reflect.Value, field reflect.StructFiel
 		case time.Time:
 			return setTimeField(val, field, value)
 		}
-		return json.Unmarshal([]byte(val), value.Addr().Interface())
+		return json.Unmarshal(bytesconv.StringToBytes(val), value.Addr().Interface())
 	case reflect.Map:
-		return json.Unmarshal([]byte(val), value.Addr().Interface())
+		return json.Unmarshal(bytesconv.StringToBytes(val), value.Addr().Interface())
 	default:
 		return errUnknownType
 	}
@@ -264,6 +266,24 @@ func setTimeField(val string, structField reflect.StructField, value reflect.Val
 	timeFormat := structField.Tag.Get("time_format")
 	if timeFormat == "" {
 		timeFormat = time.RFC3339
+	}
+
+	switch tf := strings.ToLower(timeFormat); tf {
+	case "unix", "unixnano":
+		tv, err := strconv.ParseInt(val, 10, 0)
+		if err != nil {
+			return err
+		}
+
+		d := time.Duration(1)
+		if tf == "unixnano" {
+			d = time.Second
+		}
+
+		t := time.Unix(tv/int64(d), tv%int64(d))
+		value.Set(reflect.ValueOf(t))
+		return nil
+
 	}
 
 	if val == "" {
